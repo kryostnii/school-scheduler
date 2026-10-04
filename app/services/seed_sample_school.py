@@ -5,10 +5,16 @@
 """
 from __future__ import annotations
 import sqlite3
+from typing import List, Dict, Any
 
 
 def seed(conn: sqlite3.Connection) -> int:
-    """Возвращает academic_year_id заполненного года."""
+    """
+    Наполняет базу данных тестовой школой с реалистичными данными.
+    
+    Returns:
+        int: ID учебного года для построения контекста
+    """
     cur = conn.cursor()
 
     cur.execute("INSERT INTO academic_years (label, is_active) VALUES ('2026/2027', 1)")
@@ -30,7 +36,7 @@ def seed(conn: sqlite3.Connection) -> int:
         ("Литературное чтение", 4, 0, 0, 0),
         ("Окружающий мир", 3, 0, 0, 0),
     ]
-    subject_ids = {}
+    subject_ids: Dict[str, int] = {}
     for name, rank, is_pe, is_heavy, allows_double in subjects:
         cur.execute(
             """INSERT INTO subjects (name, difficulty_rank, is_physical_education,
@@ -42,7 +48,7 @@ def seed(conn: sqlite3.Connection) -> int:
 
     cabinets = [("101", 30, "general"), ("102", 30, "general"),
                 ("Спортзал", 40, "gym"), ("Каб. информатики", 15, "computer")]
-    cabinet_ids = {}
+    cabinet_ids: Dict[str, int] = {}
     for number, capacity, room_type in cabinets:
         cur.execute("INSERT INTO cabinets (number, capacity, room_type) VALUES (?, ?, ?)",
                     (number, capacity, room_type))
@@ -53,26 +59,58 @@ def seed(conn: sqlite3.Connection) -> int:
         "Смирнова Е.Н.", "Новикова О.С.", "Волков И.Р.", "Морозова Т.К.",
         "Соколов В.Л.", "Егорова Н.Ю.",
     ]
-    teacher_ids = {}
+    teacher_ids: Dict[str, int] = {}
     for name in teacher_names:
         cur.execute("INSERT INTO teachers (full_name, max_load_hours) VALUES (?, 24)", (name,))
         teacher_ids[name] = cur.lastrowid
 
-    def add_class(grade, letter, shift_id):
+    def add_class(grade: int, letter: str, shift_id: int) -> int:
+        """
+        Добавляет класс в базу данных.
+        
+        Args:
+            grade: Номер класса (1-12)
+            letter: Буква класса
+            shift_id: ID смены
+            
+        Returns:
+            int: ID добавленного класса
+        """
         cur.execute(
             "INSERT INTO classes (academic_year_id, grade, letter, shift_id) VALUES (?, ?, ?, ?)",
             (year_id, grade, letter, shift_id),
         )
         return cur.lastrowid
 
-    def add_class_subject(class_id, subject_name, hours, is_split=0):
+    def add_class_subject(class_id: int, subject_name: str, hours: int, is_split: int = 0) -> int:
+        """
+        Добавляет предмет в учебный план класса.
+        
+        Args:
+            class_id: ID класса
+            subject_name: Название предмета
+            hours: Количество часов в неделю
+            is_split: Признак деления на подгруппы
+            
+        Returns:
+            int: ID добавленного предмета класса
+        """
         cur.execute(
             "INSERT INTO class_subjects (class_id, subject_id, hours_per_week, is_split) VALUES (?, ?, ?, ?)",
             (class_id, subject_ids[subject_name], hours, is_split),
         )
         return cur.lastrowid
 
-    def add_group(class_subject_id, teacher_name, group_number=1, cabinet=None):
+    def add_group(class_subject_id: int, teacher_name: str, group_number: int = 1, cabinet: str = None) -> None:
+        """
+        Добавляет подгруппу в базу данных.
+        
+        Args:
+            class_subject_id: ID предмета класса
+            teacher_name: ФИО учителя
+            group_number: Номер подгруппы (1 или 2)
+            cabinet: Номер кабинета (если указан)
+        """
         cur.execute(
             """INSERT INTO subject_groups (class_subject_id, group_number, teacher_id, cabinet_id)
                VALUES (?, ?, ?, ?)""",

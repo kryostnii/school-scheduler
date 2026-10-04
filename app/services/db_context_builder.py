@@ -11,10 +11,12 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import List, Dict, Any
 from app.services.reference_scheduler import ScheduleContext, SubjectGroupInfo
 
 
-def _dict_rows(conn: sqlite3.Connection, query: str, params: tuple = ()) -> list[dict]:
+def _dict_rows(conn: sqlite3.Connection, query: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    """Извлекает строки из БД и преобразует их в список словарей."""
     cur = conn.execute(query, params)
     columns = [desc[0] for desc in cur.description]
     return [dict(zip(columns, row)) for row in cur.fetchall()]
@@ -24,6 +26,13 @@ def build_context_from_db(conn: sqlite3.Connection, academic_year_id: int) -> Sc
     """
     Собирает ScheduleContext для одного учебного года из живой SQLite-БД
     (раздел 3 ТЗ: атомарная единица планирования — subject_groups).
+    
+    Args:
+        conn: Подключение к SQLite базе данных
+        academic_year_id: ID учебного года для построения контекста
+        
+    Returns:
+        ScheduleContext: Структура данных для алгоритма планирования
     """
     rows = _dict_rows(conn, """
         SELECT
@@ -69,6 +78,11 @@ def save_chromosome_to_db(conn: sqlite3.Connection, ctx: ScheduleContext, chromo
     "модуль интерактивного расписания" читает готовое расписание из этой таблицы).
     Перед записью удаляет старые записи для тех же subject_group_id, чтобы
     повторный запуск генерации не плодил дубликаты.
+    
+    Args:
+        conn: Подключение к SQLite базе данных
+        ctx: Контекст расписания с метаданными
+        chromosome: Хромосома (расписание) для сохранения
     """
     group_ids = {g.id for g in ctx.groups}
     conn.executemany(
