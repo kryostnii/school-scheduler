@@ -1,0 +1,1 @@
+cd /home/kryostnii/Downloads/backup/school-scheduler && PYTHONPATH=/home/kryostnii/Downloads/backup/school-scheduler/venv/lib/python3.14/site-packages python3 -m app.main

@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+
+# C++ / CMake
+build/
+*.o
+*.so
+*.pyd
+CMakeCache.txt
+CMakeFiles/
+
+# Data
+*.sqlite3
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+full_project.txt
+ask_project.py
