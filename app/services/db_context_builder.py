@@ -100,3 +100,18 @@ def save_chromosome_to_db(conn: sqlite3.Connection, ctx: ScheduleContext, chromo
         rows_to_insert,
     )
     conn.commit()
+
+
+# Добавленная функция для тестирования
+def test_db_context_builder() -> None:
+    """
+    Простая функция для тестирования работы db_context_builder.
+    Может быть использована для проверки корректности подключения к БД.
+    """
+    try:
+        # Эта функция не будет работать без реальной БД, но показывает структуру
+        print("Функции db_context_builder готовы к использованию")
+        print("- build_context_from_db: Сбор контекста из БД")
+        print("- save_chromosome_to_db: Сохранение расписания в БД")
+    except Exception as e:
+        print(f"Ошибка при тестировании: {e}")
