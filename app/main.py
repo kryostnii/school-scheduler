@@ -1,22 +1,26 @@
 """Точка входа приложения School Scheduler."""
-import os
 import sys
-import shutil
-import sqlite3
-import pathlib
-import platform
+import os
+from pathlib import Path
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+# Добавляем путь к модулям 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Для упрощения использования UI-интерфейса без сложной архитектуры
-# Будем использовать упрощенную версию, которая инициализирует GUI напрямую
-
-from PySide6.QtWidgets import QApplication
-from app.ui.main_window import main as gui_main
-
-def main():
-    # Просто запускаем GUI
-    return gui_main()
-
+# Проверяем, запущен ли файл напрямую или через импорт
 if __name__ == "__main__":
+    from app.ui.main_window_fixed import main as gui_main
+    
+    def main():
+        # Просто запускаем GUI
+        return gui_main()
+    
     main()
+else:
+    # В режиме импорта используем упрощенную версию 
+    from app.ui.main_window_fixed import SchoolSchedulerMainWindow
+    
+    def main():
+        """Простая функция для запуска"""
+        return SchoolSchedulerMainWindow()
+    
+    __all__ = ["main"]

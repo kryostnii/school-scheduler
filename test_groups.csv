@@ -1,0 +1,15 @@
+id,class_id,grade,teacher_id,hours_per_week,is_physical_education,is_heavy_subject
+1,101,5,1,5,False,True
+2,101,5,2,4,False,True
+3,101,5,3,2,True,False
+4,101,5,4,3,False,False
+5,101,5,5,2,False,False
+6,102,5,1,5,True,True
+7,102,5,6,4,False,True
+8,102,5,3,2,True,False
+9,102,5,7,3,False,False
+10,102,5,8,2,False,False
+11,201,2,9,5,True,True
+12,201,2,10,4,False,False
+13,201,2,11,2,True,False
+14,201,2,12,3,False,False
