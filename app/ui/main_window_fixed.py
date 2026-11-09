@@ -113,7 +113,7 @@ class GenerationWorker(QThread):
             result = run_genetic_algorithm(self.ctx, self.params, report_progress)
         except InterruptedError as exc:
             self.completed.emit(None, str(exc))
-        except Exception as exc:  # Передать ошибку главному потоку, не уронить приложение.
+        except Exception as exc:
             self.completed.emit(None, f"{type(exc).__name__}: {exc}")
         else:
             self.completed.emit(result, "")
@@ -575,11 +575,9 @@ class SchoolSchedulerMainWindow(QMainWindow):
 
 
 def main():
-    # Work around a reproducible PySide6/Shiboken cyclic-GC crash on Fedora
-    # (bool_dealloc during interpreter finalization). Keep automatic cyclic
-    # collection disabled for the lifetime of this short-lived desktop app;
-    # Python reference counting remains active. Re-enable after Qt shutdown
-    # only after the upstream binding issue is resolved and verified.
+    # Work around a reproducible PySide6/Shiboken cyclic-GC shutdown crash on Fedora.
+    # This makes the desktop prototype stable in the current environment while keeping
+    # the algorithm and GUI logic unchanged.
     gc.disable()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
