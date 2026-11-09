@@ -1,4 +1,5 @@
 """Рабочий графический прототип генератора школьного расписания."""
+import gc
 import json
 import sys
 from pathlib import Path
@@ -305,7 +306,6 @@ class SchoolSchedulerMainWindow(QMainWindow):
         self._release_worker_if_done()
 
     def _release_worker_if_done(self):
-        # Не уничтожать Python-обёртку QThread до завершения и доставки результата.
         if self.worker and self._worker_completed and self._worker_thread_stopped:
             worker = self.worker
             self.worker = None
@@ -575,6 +575,12 @@ class SchoolSchedulerMainWindow(QMainWindow):
 
 
 def main():
+    # Work around a reproducible PySide6/Shiboken cyclic-GC crash on Fedora
+    # (bool_dealloc during interpreter finalization). Keep automatic cyclic
+    # collection disabled for the lifetime of this short-lived desktop app;
+    # Python reference counting remains active. Re-enable after Qt shutdown
+    # only after the upstream binding issue is resolved and verified.
+    gc.disable()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet("""
