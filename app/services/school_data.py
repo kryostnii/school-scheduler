@@ -65,7 +65,6 @@ def validate_school_data(document: Any) -> dict[str, Any]:
         raise ValueError(f"Ожидался формат {SCHOOL_FORMAT!r}")
     if document.get("version") != SCHOOL_VERSION:
         raise ValueError(f"Неподдерживаемая версия данных школы: {document.get('version')!r}")
-
     days = document.get("days_per_week")
     if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 7:
         raise ValueError("days_per_week должен быть целым числом от 1 до 7")
@@ -73,18 +72,16 @@ def validate_school_data(document: Any) -> dict[str, Any]:
     if not isinstance(school_name, str) or not school_name.strip():
         raise ValueError("school_name должен быть непустой строкой")
 
-    raw_classes = document.get("classes")
-    raw_groups = document.get("groups")
+    raw_classes, raw_groups = document.get("classes"), document.get("groups")
     if not isinstance(raw_classes, list) or not raw_classes:
         raise ValueError("Добавьте хотя бы один класс в classes")
     if not isinstance(raw_groups, list) or not raw_groups:
         raise ValueError("Добавьте хотя бы одну учебную группу в groups")
 
-    classes = []
-    class_ids: set[int] = set()
+    classes, class_ids = [], set()
     for index, row in enumerate(raw_classes):
         if not isinstance(row, dict):
-            raise ValueError(f"classes[{index}] долже�� быть объектом")
+            raise ValueError(f"classes[{index}] должен быть объектом")
         class_id = _positive_int(row.get("id"), f"classes[{index}].id")
         grade = _positive_int(row.get("grade"), f"classes[{index}].grade")
         if grade > 12:
@@ -97,8 +94,7 @@ def validate_school_data(document: Any) -> dict[str, Any]:
         class_ids.add(class_id)
         classes.append({"id": class_id, "name": name.strip(), "grade": grade})
 
-    groups = []
-    group_ids: set[int] = set()
+    groups, group_ids = [], set()
     for index, row in enumerate(raw_groups):
         if not isinstance(row, dict):
             raise ValueError(f"groups[{index}] должен быть объектом")
@@ -163,9 +159,8 @@ def build_context(data: dict[str, Any]) -> tuple[ScheduleContext, dict[int, str]
     school = validate_school_data(data)
     classes_by_id = {item["id"]: item for item in school["classes"]}
     context = ScheduleContext(days_per_week=school["days_per_week"])
-    subject_names: dict[int, str] = {}
+    subject_names = {}
     class_names = {item["id"]: item["name"] for item in school["classes"]}
-
     for group in school["groups"]:
         class_row = classes_by_id[group["class_id"]]
         context.groups.append(SubjectGroupInfo(
@@ -179,6 +174,5 @@ def build_context(data: dict[str, Any]) -> tuple[ScheduleContext, dict[int, str]
             is_heavy_subject=group["is_heavy_subject"],
         ))
         subject_names[group["id"]] = group["subject"]
-
     context.build_lesson_instances()
     return context, subject_names, class_names

@@ -28,67 +28,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.services.reference_scheduler import (
-    GAParams,
-    GAResult,
-    Gene,
-    ScheduleContext,
-    SubjectGroupInfo,
-    evaluate,
-    run_genetic_algorithm,
+from app.services.reference_scheduler import GAParams, GAResult, Gene, evaluate, run_genetic_algorithm
+from app.services.school_data import (
+    build_context,
+    load_school_data,
+    sample_school_data,
+    validate_school_data,
 )
+from app.services.schedule_files import load_schedule_document, make_schedule_document
 
-
-DAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
-SAMPLE_CLASSES = {101: "5А", 102: "5Б", 201: "2А"}
-SCHEDULE_FORMAT = "school-scheduler-schedule"
-SCHEDULE_VERSION = 1
+DAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 SUBJECT_COLORS = [
     "#d6eaf8", "#d5f5e3", "#fcf3cf", "#fadbd8", "#e8daef",
     "#d1f2eb", "#f5cba7", "#d6dbdf", "#f9e79f", "#aed6f1",
 ]
-
-
-def build_sample_context() -> tuple[ScheduleContext, dict[int, str]]:
-    """Создать небольшие тестовые данные, включающие общих учителей и кабинеты."""
-    ctx = ScheduleContext(days_per_week=6)
-    subject_names: dict[int, str] = {}
-    next_id = 1
-
-    def add_group(class_id, grade, teacher_id, subject, hours, *, pe=False, heavy=False):
-        nonlocal next_id
-        group_id = next_id
-        next_id += 1
-        ctx.groups.append(SubjectGroupInfo(
-            id=group_id,
-            class_id=class_id,
-            grade=grade,
-            teacher_id=teacher_id,
-            hours_per_week=hours,
-            is_physical_education=pe,
-            is_heavy_subject=heavy,
-        ))
-        subject_names[group_id] = subject
-
-    add_group(101, 5, 1, "Математика", 5, heavy=True)
-    add_group(101, 5, 2, "Русский язык", 4, heavy=True)
-    add_group(101, 5, 3, "Физкультура", 2, pe=True)
-    add_group(101, 5, 4, "История", 3)
-    add_group(101, 5, 5, "Биология", 2)
-
-    add_group(102, 5, 1, "Математика", 5, heavy=True)
-    add_group(102, 5, 6, "Русский язык", 4, heavy=True)
-    add_group(102, 5, 3, "Физкультура", 2, pe=True)
-    add_group(102, 5, 7, "История", 3)
-    add_group(102, 5, 8, "Биология", 2)
-
-    add_group(201, 2, 9, "Математика", 5, heavy=True)
-    add_group(201, 2, 10, "Чтение", 4)
-    add_group(201, 2, 11, "Физкультура", 2, pe=True)
-    add_group(201, 2, 12, "Окружающий мир", 3)
-
-    ctx.build_lesson_instances()
-    return ctx, subject_names
 
 
 class GenerationWorker(QThread):
@@ -97,9 +50,9 @@ class GenerationWorker(QThread):
     progress = Signal(int, float, int)
     completed = Signal(object, str)
 
-    def __init__(self, ctx: ScheduleContext, params: GAParams, parent=None):
+    def __init__(self, context, params, parent=None):
         super().__init__(parent)
-        self.ctx = ctx
+        self.context = context
         self.params = params
         self._stop_requested = False
 
@@ -110,7 +63,7 @@ class GenerationWorker(QThread):
             self.progress.emit(generation, fitness, hard_conflicts)
 
         try:
-            result = run_genetic_algorithm(self.ctx, self.params, report_progress)
+            result = run_genetic_algorithm(self.context, self.params, report_progress)
         except InterruptedError as exc:
             self.completed.emit(None, str(exc))
         except Exception as exc:
@@ -123,53 +76,57 @@ class GenerationWorker(QThread):
 
 
 class SchoolSchedulerMainWindow(QMainWindow):
-    """GUI-прототип: тестовые данные → алгоритм → ручное редактирование → файл."""
+    """Генерация, ручная правка, импорт школы и переносимые JSON-расписания."""
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Школьное расписание — рабочий прототип")
-        self.resize(1100, 780)
-        self.ctx, self.subject_names = build_sample_context()
+        self.resize(1120, 800)
+        self.school_data = validate_school_data(sample_school_data())
+        self.context, self.subject_names, self.class_names = build_context(self.school_data)
         self.worker = None
         self._worker_completed = False
         self._worker_thread_stopped = False
         self.result = None
         self._setup_ui()
+        self._refresh_school_summary()
 
     def _setup_ui(self):
         central = QWidget(self)
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         title = QLabel("Генератор школьного расписания")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size: 22px; font-weight: bold; color: #263238;")
         layout.addWidget(title)
 
-        intro = QLabel(
-            "Демо-данные: запустите генерацию, затем дважды щёлкните по ячейке, "
-            "чтобы переместить урок. Сохранение и открытие работают с JSON-файлами. "
-            "Данные реальной школы пока не подключены."
-        )
-        intro.setWordWrap(True)
-        intro.setStyleSheet("color: #455a64; padding: 4px;")
-        layout.addWidget(intro)
+        self.school_label = QLabel()
+        self.school_label.setWordWrap(True)
+        self.school_label.setStyleSheet("color: #455a64; padding: 4px;")
+        layout.addWidget(self.school_label)
 
-        settings = QGroupBox("Параметры поиска")
+        actions = QHBoxLayout()
+        self.open_school_button = QPushButton("📂 Открыть данные школы")
+        self.open_school_button.clicked.connect(self.open_school_data)
+        self.save_school_button = QPushButton("💾 Сохранить данные школы")
+        self.save_school_button.clicked.connect(self.save_school_data)
+        actions.addWidget(self.open_school_button)
+        actions.addWidget(self.save_school_button)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        settings = QGroupBox("Параметры генерации")
         form = QFormLayout(settings)
         self.class_combo = QComboBox()
-        for class_id, label in SAMPLE_CLASSES.items():
-            self.class_combo.addItem(label, class_id)
         self.class_combo.currentIndexChanged.connect(self._render_schedule)
         form.addRow("Показать класс:", self.class_combo)
-
         self.population_spin = QSpinBox()
         self.population_spin.setRange(10, 500)
         self.population_spin.setValue(60)
         form.addRow("Размер популяции:", self.population_spin)
-
         self.generations_spin = QSpinBox()
         self.generations_spin.setRange(10, 2000)
         self.generations_spin.setValue(300)
@@ -182,15 +139,15 @@ class SchoolSchedulerMainWindow(QMainWindow):
         self.stop_button = QPushButton("■ Остановить")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop_optimization)
-        self.save_button = QPushButton("💾 Сохранить расписание")
-        self.save_button.clicked.connect(self.save_schedule)
-        self.load_button = QPushButton("📂 Открыть расписание")
-        self.load_button.clicked.connect(self.load_schedule)
         buttons.addWidget(self.run_button)
         buttons.addWidget(self.stop_button)
         buttons.addStretch()
-        buttons.addWidget(self.load_button)
-        buttons.addWidget(self.save_button)
+        self.open_schedule_button = QPushButton("Открыть расписание")
+        self.open_schedule_button.clicked.connect(self.open_schedule)
+        self.save_schedule_button = QPushButton("Сохранить расписание")
+        self.save_schedule_button.clicked.connect(self.save_schedule)
+        buttons.addWidget(self.open_schedule_button)
+        buttons.addWidget(self.save_schedule_button)
         layout.addLayout(buttons)
 
         self.progress = QProgressBar()
@@ -202,30 +159,86 @@ class SchoolSchedulerMainWindow(QMainWindow):
         result_layout = QVBoxLayout(result_group)
         self.results = QTextEdit()
         self.results.setReadOnly(True)
-        self.results.setMaximumHeight(145)
+        self.results.setMaximumHeight(135)
         result_layout.addWidget(self.results)
         layout.addWidget(result_group)
 
-        schedule_group = QGroupBox("Расписание выбранного класса — двойной щелчок для перемещения")
-        schedule_layout = QVBoxLayout(schedule_group)
+        self.schedule_group = QGroupBox()
+        schedule_layout = QVBoxLayout(self.schedule_group)
         self.schedule_table = QTableWidget(10, 6)
-        self.schedule_table.setHorizontalHeaderLabels(DAY_NAMES)
         self.schedule_table.setVerticalHeaderLabels([f"Урок {i}" for i in range(1, 11)])
         self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.schedule_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.schedule_table.cellDoubleClicked.connect(self._edit_schedule_cell)
         schedule_layout.addWidget(self.schedule_table)
-        layout.addWidget(schedule_group, stretch=1)
+        layout.addWidget(self.schedule_group, stretch=1)
 
-        self.statusBar().showMessage(
-            f"Тестовые данные: {len(self.ctx.groups)} учебных групп, "
-            f"{len(self.ctx.lesson_instances)} часов в неделю"
+    def _refresh_school_summary(self):
+        days = self.school_data["days_per_week"]
+        self.school_label.setText(
+            f"Школа: {self.school_data['school_name']} · "
+            f"классов: {len(self.school_data['classes'])} · "
+            f"учебных групп: {len(self.context.groups)} · "
+            f"часов в неделю: {len(self.context.lesson_instances)} · дней: {days}"
         )
+        self.class_combo.blockSignals(True)
+        current_id = self.class_combo.currentData()
+        self.class_combo.clear()
+        for item in self.school_data["classes"]:
+            self.class_combo.addItem(item["name"], item["id"])
+        index = self.class_combo.findData(current_id)
+        if index >= 0:
+            self.class_combo.setCurrentIndex(index)
+        self.class_combo.blockSignals(False)
+        self.schedule_table.setColumnCount(days)
+        self.schedule_table.setHorizontalHeaderLabels(DAY_NAMES[:days])
+        self.schedule_group.setTitle(
+            f"Расписание: {self.class_combo.currentText()} — двойной щелчок для перемещения"
+        )
+        self._render_schedule()
+
+    def open_school_data(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Открыть данные школы", "", "Данные школы (*.json)"
+        )
+        if not filename:
+            return
+        try:
+            school = load_school_data(filename)
+            context, subjects, classes = build_context(school)
+        except (OSError, UnicodeError, ValueError) as exc:
+            QMessageBox.critical(self, "Ошибка загрузки данных", str(exc))
+            return
+        self.school_data = school
+        self.context, self.subject_names, self.class_names = context, subjects, classes
+        self.result = None
+        self.results.clear()
+        self.schedule_table.clearContents()
+        self._refresh_school_summary()
+        self.statusBar().showMessage(f"Данные школы загружены: {filename}")
+
+    def save_school_data(self):
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить данные школы", "school-data.json", "Данные школы (*.json)"
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if path.suffix.lower() != ".json":
+            path = path.with_suffix(".json")
+        try:
+            path.write_text(json.dumps(self.school_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(self, "Ошибка сохранения данных", str(exc))
+            return
+        self.statusBar().showMessage(f"Данные школы сохранены: {path}")
 
     def run_optimization(self):
         if self.worker and self.worker.isRunning():
             return
-        self.ctx, self.subject_names = build_sample_context()
+        if not self.context.lesson_instances:
+            QMessageBox.warning(self, "Нет данных", "В учебных группах нет часов для генерации.")
+            return
         params = GAParams(
             population_size=self.population_spin.value(),
             max_generations=self.generations_spin.value(),
@@ -236,19 +249,18 @@ class SchoolSchedulerMainWindow(QMainWindow):
         self.schedule_table.clearContents()
         self.results.clear()
         self.results.append(
-            f"Запуск реального Python-алгоритма: {len(self.ctx.groups)} групп, "
-            f"{len(self.ctx.lesson_instances)} уроков-часов, "
-            f"популяция {params.population_size}, поколений {params.max_generations}."
+            f"Генерация: {self.school_data['school_name']}; "
+            f"{len(self.context.groups)} групп; {len(self.context.lesson_instances)} часов."
         )
         self.progress.setRange(0, params.max_generations)
         self.progress.setValue(0)
         self.progress.setFormat("Поиск расписания…")
         self.run_button.setEnabled(False)
+        self.open_school_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-
         self._worker_completed = False
         self._worker_thread_stopped = False
-        self.worker = GenerationWorker(self.ctx, params, self)
+        self.worker = GenerationWorker(self.context, params, self)
         self.worker.progress.connect(self._on_progress)
         self.worker.completed.connect(self._on_completed)
         self.worker.finished.connect(self._on_worker_thread_finished)
@@ -266,15 +278,14 @@ class SchoolSchedulerMainWindow(QMainWindow):
         self.progress.setFormat(f"Поколение {generation}: ошибок {hard_conflicts}")
         if generation == 1 or generation % 25 == 0:
             self.results.append(
-                f"Поколение {generation}: жёстких конфликтов {hard_conflicts}, "
-                f"общий штраф {fitness:.1f}"
+                f"Поколен��е {generation}: жёстких конфликтов {hard_conflicts}, штраф {fitness:.1f}"
             )
 
     def _on_completed(self, result, error):
         self._worker_completed = True
         self.run_button.setEnabled(True)
+        self.open_school_button.setEnabled(True)
         self.stop_button.setEnabled(False)
-
         if error:
             self.progress.setFormat("Поиск остановлен или завершился ошибкой")
             self.results.append(error)
@@ -284,18 +295,14 @@ class SchoolSchedulerMainWindow(QMainWindow):
             fitness = result.best_fitness
             self.results.append(
                 f"Завершено за {result.generations_run} поколений. "
-                f"Жёсткие конфликты: {fitness.hard_conflicts}; "
-                f"мягкий штраф: {fitness.soft_penalty:.1f}; "
-                f"итоговая оценка: {fitness.total():.1f}."
+                f"Жёстких конфликтов: {fitness.hard_conflicts}; "
+                f"мягкий штраф: {fitness.soft_penalty:.1f}."
             )
             if fitness.hard_conflicts == 0:
-                self.results.append("Допустимое расписание найдено: жёстких конфликтов нет.")
+                self.results.append("Допустимое расписание найдено относительно реализованных ограничений.")
                 self.progress.setFormat("Готово — жёстких конфликтов нет")
             else:
-                self.results.append(
-                    "Полностью допустимое расписание не найдено; результат отображён "
-                    "для анализа и не объявляется успешным."
-                )
+                self.results.append("Остались жёсткие конфликты; проверьте расписание перед использованием.")
                 self.progress.setFormat(f"Готово — осталось ошибок: {fitness.hard_conflicts}")
             self._render_schedule()
             self.statusBar().showMessage("Поиск завершён")
@@ -312,292 +319,168 @@ class SchoolSchedulerMainWindow(QMainWindow):
             worker.deleteLater()
 
     def _render_schedule(self):
+        days = self.school_data["days_per_week"]
         self.schedule_table.clearContents()
         if not self.result or not self.result.best:
             return
         class_id = self.class_combo.currentData()
-        slots: dict[tuple[int, int], list[tuple[str, int]]] = {}
-        for index, instance in enumerate(self.ctx.lesson_instances):
-            group = self.ctx.groups[instance.group_index]
+        slots = {}
+        for index, instance in enumerate(self.context.lesson_instances):
+            group = self.context.groups[instance.group_index]
             if group.class_id != class_id:
                 continue
             gene = self.result.best[index]
-            label = self.subject_names.get(group.id, f"Предмет {group.id}")
-            slots.setdefault((gene.day, gene.lesson_number), []).append((label, index))
-
-        subject_order = {
-            name: index % len(SUBJECT_COLORS)
+            slots.setdefault((gene.day, gene.lesson_number), []).append(
+                (self.subject_names.get(group.id, f"Предмет {group.id}"), index)
+            )
+        colors = {
+            name: SUBJECT_COLORS[index % len(SUBJECT_COLORS)]
             for index, name in enumerate(sorted(set(self.subject_names.values())))
         }
         for (day, lesson), placements in slots.items():
-            if not (1 <= day <= 6 and 1 <= lesson <= self.schedule_table.rowCount()):
+            if not (1 <= day <= days and 1 <= lesson <= self.schedule_table.rowCount()):
                 continue
             labels = [label for label, _ in placements]
             item = QTableWidgetItem(" / ".join(labels))
             item.setTextAlignment(Qt.AlignCenter)
-            color = "#f5b7b1" if len(labels) > 1 else SUBJECT_COLORS[subject_order[labels[0]]]
-            item.setBackground(QColor(color))
             item.setForeground(QColor("#263238"))
-            if len(labels) > 1:
-                item.setToolTip("Несколько уроков в одном слоте: проверьте конфликт")
-            else:
-                item.setToolTip(labels[0])
+            item.setBackground(QColor("#f5b7b1" if len(labels) > 1 else colors[labels[0]]))
+            item.setToolTip(" / ".join(labels))
             self.schedule_table.setItem(lesson - 1, day - 1, item)
 
     def _edit_schedule_cell(self, row, column):
         if not self.result or not self.result.best:
             QMessageBox.information(self, "Нет расписания", "Сначала запустите генерацию или откройте файл расписания.")
             return
-
         class_id = self.class_combo.currentData()
         target_slot = (column + 1, row + 1)
         class_indices = [
-            index for index, instance in enumerate(self.ctx.lesson_instances)
-            if self.ctx.groups[instance.group_index].class_id == class_id
+            i for i, lesson in enumerate(self.context.lesson_instances)
+            if self.context.groups[lesson.group_index].class_id == class_id
         ]
         target_indices = [
-            index for index in class_indices
-            if (self.result.best[index].day, self.result.best[index].lesson_number) == target_slot
+            i for i in class_indices
+            if (self.result.best[i].day, self.result.best[i].lesson_number) == target_slot
         ]
         if len(target_indices) > 1:
-            QMessageBox.warning(
-                self, "Слот содержит конфликт",
-                "В целевой ячейке уже несколько уроков. Сначала устраните этот конфликт, "
-                "переместив один из уроков.",
+            QMessageBox.warning(self, "Конфликтный слот", "В слоте несколько уроков; сначала выберите другой урок для перемещения.")
+            return
+        choices, indices = [], []
+        for i in class_indices:
+            instance = self.context.lesson_instances[i]
+            group = self.context.groups[instance.group_index]
+            gene = self.result.best[i]
+            day_name = DAY_NAMES[gene.day - 1]
+            choices.append(
+                f"{self.subject_names[group.id]} (час {instance.occurrence + 1}) — {day_name}, урок {gene.lesson_number}"
             )
-            return
-
-        choices = []
-        choice_indices = []
-        for index in class_indices:
-            instance = self.ctx.lesson_instances[index]
-            group = self.ctx.groups[instance.group_index]
-            gene = self.result.best[index]
-            subject = self.subject_names.get(group.id, f"Предмет {group.id}")
-            position = f"{DAY_NAMES[gene.day - 1]}, урок {gene.lesson_number}"
-            choices.append(f"{subject} (час {instance.occurrence + 1}) — {position}")
-            choice_indices.append(index)
-        if not choices:
-            return
-
+            indices.append(i)
         selected, accepted = QInputDialog.getItem(
-            self, "Переместить урок", "Выберите урок этого класса для перемещения:",
-            choices, 0, False,
+            self, "Переместить урок", "Выберите урок для перемещения в выбранную ячейку:", choices, 0, False
         )
         if not accepted:
             return
-        selected_index = choice_indices[choices.index(selected)]
-        source_gene = self.result.best[selected_index]
-        if (source_gene.day, source_gene.lesson_number) == target_slot:
+        selected_index = indices[choices.index(selected)]
+        source = self.result.best[selected_index]
+        if (source.day, source.lesson_number) == target_slot:
             return
-
         proposed = list(self.result.best)
         if target_indices:
-            other_index = target_indices[0]
-            proposed[selected_index] = Gene(target_slot[0], target_slot[1])
-            proposed[other_index] = Gene(source_gene.day, source_gene.lesson_number)
+            other = target_indices[0]
+            proposed[selected_index] = Gene(*target_slot)
+            proposed[other] = Gene(source.day, source.lesson_number)
         else:
-            proposed[selected_index] = Gene(target_slot[0], target_slot[1])
-
-        new_fitness = evaluate(proposed, self.ctx)
+            proposed[selected_index] = Gene(*target_slot)
+        new_fitness = evaluate(proposed, self.context)
         old_fitness = self.result.best_fitness
         if new_fitness.hard_conflicts > old_fitness.hard_conflicts:
             answer = QMessageBox.question(
-                self,
-                "Появятся дополнительные конфликты",
-                f"После изменения жёстких конфликтов станет {new_fitness.hard_conflicts} "
-                f"(было {old_fitness.hard_conflicts}). Всё равно применить?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+                self, "Изменение добавляет конфликты",
+                f"Жёстких конфликтов станет {new_fitness.hard_conflicts} вместо {old_fitness.hard_conflicts}. Применить?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
                 return
-
-        self.result = GAResult(
-            best=proposed,
-            best_fitness=new_fitness,
-            generations_run=self.result.generations_run,
-        )
+        self.result = GAResult(proposed, new_fitness, self.result.generations_run)
         self._render_schedule()
         self.results.append(
-            f"Расписание вручную изменено. Жёсткие конфликты: {new_fitness.hard_conflicts}; "
+            f"Правка применена. Жёстких конфликтов: {new_fitness.hard_conflicts}; "
             f"мягкий штраф: {new_fitness.soft_penalty:.1f}."
         )
-        self.statusBar().showMessage("Изменение применено; сохраните расписание в файл")
-
-    def _schedule_document(self):
-        entries = []
-        for index, instance in enumerate(self.ctx.lesson_instances):
-            gene = self.result.best[index]
-            group = self.ctx.groups[instance.group_index]
-            entries.append({
-                "group_id": group.id,
-                "occurrence": instance.occurrence,
-                "day": gene.day,
-                "lesson": gene.lesson_number,
-            })
-        return {
-            "format": SCHEDULE_FORMAT,
-            "version": SCHEDULE_VERSION,
-            "days_per_week": self.ctx.days_per_week,
-            "groups": [
-                {
-                    "id": group.id,
-                    "class_id": group.class_id,
-                    "grade": group.grade,
-                    "teacher_id": group.teacher_id,
-                    "hours_per_week": group.hours_per_week,
-                    "subject": self.subject_names.get(group.id, ""),
-                }
-                for group in self.ctx.groups
-            ],
-            "schedule": entries,
-        }
+        self.statusBar().showMessage("Расписание изменено; сохраните результат в JSON")
 
     def save_schedule(self):
         if not self.result or not self.result.best:
             QMessageBox.information(self, "Нет расписания", "Сначала сгенерируйте или откройте расписание.")
             return
-        file_name, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить расписание", "school-schedule.json", "Файлы расписания (*.json)"
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить расписание", "school-schedule.json", "Расписание (*.json)"
         )
-        if not file_name:
+        if not filename:
             return
-        path = Path(file_name)
+        path = Path(filename)
         if path.suffix.lower() != ".json":
             path = path.with_suffix(".json")
         try:
-            path.write_text(
-                json.dumps(self._schedule_document(), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            QMessageBox.critical(self, "Ошибка сохранения", str(exc))
+            document = make_schedule_document(self.school_data, self.context, self.result.best)
+            path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Ошибка сохранения расписания", str(exc))
             return
+        self.results.append(f"Расписание сохранено: {path}")
         self.statusBar().showMessage(f"Расписание сохранено: {path}")
-        self.results.append(f"Файл расписания сохранён: {path}")
 
-    def load_schedule(self):
-        file_name, _ = QFileDialog.getOpenFileName(
-            self, "Открыть расписание", "", "Файлы расписания (*.json)"
+    def open_schedule(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Открыть расписание", "", "Расписание (*.json)"
         )
-        if not file_name:
+        if not filename:
             return
         try:
-            document = json.loads(Path(file_name).read_text(encoding="utf-8"))
-            chromosome = self._validate_schedule_document(document)
-        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
-            QMessageBox.critical(self, "Не удалось открыть расписание", str(exc))
+            document = json.loads(Path(filename).read_text(encoding="utf-8"))
+            school, context, subjects, classes, chromosome = load_schedule_document(document)
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            QMessageBox.critical(self, "Ошибка открытия расписания", str(exc))
             return
-
-        self.result = GAResult(
-            best=chromosome,
-            best_fitness=evaluate(chromosome, self.ctx),
-            generations_run=0,
-        )
-        self._render_schedule()
+        self.school_data = school
+        self.context, self.subject_names, self.class_names = context, subjects, classes
+        self.result = GAResult(chromosome, evaluate(chromosome, context), 0)
+        self.results.clear()
         self.results.append(
-            f"Загружен файл: {file_name}. Жёстких конфликтов: "
-            f"{self.result.best_fitness.hard_conflicts}; мягкий штраф: "
-            f"{self.result.best_fitness.soft_penalty:.1f}."
+            f"Открыто расписание: {filename}. Жёстких конфликтов: "
+            f"{self.result.best_fitness.hard_conflicts}; "
+            f"мягкий штраф: {self.result.best_fitness.soft_penalty:.1f}."
         )
-        self.statusBar().showMessage(f"Расписание открыто: {file_name}")
-
-    def _validate_schedule_document(self, document):
-        if not isinstance(document, dict):
-            raise ValueError("Корень JSON должен быть объектом")
-        if document.get("format") != SCHEDULE_FORMAT:
-            raise ValueError("Это не файл расписания School Scheduler")
-        if document.get("version") != SCHEDULE_VERSION:
-            raise ValueError(f"Неподдерживаемая версия файла: {document.get('version')}")
-        if document.get("days_per_week") != self.ctx.days_per_week:
-            raise ValueError("Число дней в файле не совпадает с текущей моделью")
-
-        expected_groups = [
-            {
-                "id": group.id,
-                "class_id": group.class_id,
-                "grade": group.grade,
-                "teacher_id": group.teacher_id,
-                "hours_per_week": group.hours_per_week,
-                "subject": self.subject_names.get(group.id, ""),
-            }
-            for group in self.ctx.groups
-        ]
-        if document.get("groups") != expected_groups:
-            raise ValueError(
-                "Состав учебных групп в файле отличается от текущих демо-данных. "
-                "Файлы этой версии можно открывать только в прототипе с тем же набором групп."
-            )
-
-        entries = document.get("schedule")
-        if not isinstance(entries, list) or len(entries) != len(self.ctx.lesson_instances):
-            raise ValueError("В файле должно быть ровно по одной записи на каждый учебный час")
-
-        expected = {
-            (instance.subject_group_id, instance.occurrence): index
-            for index, instance in enumerate(self.ctx.lesson_instances)
-        }
-        chromosome: list[Gene | None] = [None] * len(self.ctx.lesson_instances)
-        for entry in entries:
-            if not isinstance(entry, dict):
-                raise ValueError("Запись расписания должна быть JSON-объектом")
-            key = (entry.get("group_id"), entry.get("occurrence"))
-            if key not in expected:
-                raise ValueError(f"Неизвестный урок в файле: {key}")
-            index = expected[key]
-            if chromosome[index] is not None:
-                raise ValueError(f"Урок {key} встречается в файле повторно")
-            day, lesson = entry.get("day"), entry.get("lesson")
-            group = self.ctx.groups[self.ctx.lesson_instances[index].group_index]
-            if not isinstance(day, int) or not 1 <= day <= self.ctx.days_per_week:
-                raise ValueError(f"Некорректный день для урока {key}: {day}")
-            if not isinstance(lesson, int) or not 1 <= lesson <= self.ctx.max_lessons_for_grade(group.grade):
-                raise ValueError(f"Некорректный номер урока для урока {key}: {lesson}")
-            chromosome[index] = Gene(day, lesson)
-        if any(gene is None for gene in chromosome):
-            raise ValueError("В файле отсутствуют некоторые учебные часы")
-        return chromosome
+        self._refresh_school_summary()
+        self.statusBar().showMessage(f"Расписание открыто: {filename}")
 
     def closeEvent(self, event):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(5000)
             if self.worker.isRunning():
-                QMessageBox.warning(
-                    self,
-                    "Поиск ещё выполняется",
-                    "Дождитесь завершения текущего поколения и закройте окно ещё раз.",
-                )
+                QMessageBox.warning(self, "Поиск ещё выполняется", "Дождитесь завершения поиска и закройте окно ещё раз.")
                 event.ignore()
                 return
         event.accept()
 
 
 def main():
-    # Work around a reproducible PySide6/Shiboken cyclic-GC shutdown crash on Fedora.
-    # This makes the desktop prototype stable in the current environment while keeping
-    # the algorithm and GUI logic unchanged.
+    # Work around the reproducible PySide6/Shiboken cyclic-GC shutdown crash on Fedora.
     gc.disable()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet("""
-        QWidget { background-color: #ffffff; color: #263238; }
-        QGroupBox { border: 1px solid #cfd8dc; border-radius: 6px; margin-top: 10px;
-                    padding: 10px; font-weight: bold; }
+        QWidget { background: #ffffff; color: #263238; }
+        QGroupBox { border: 1px solid #cfd8dc; border-radius: 6px; margin-top: 10px; padding: 10px; font-weight: bold; }
         QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
-        QPushButton { background: #f5f7f8; border: 1px solid #b0bec5; border-radius: 5px;
-                      padding: 7px 12px; color: #263238; }
+        QPushButton { background: #f5f7f8; border: 1px solid #b0bec5; border-radius: 5px; padding: 7px 12px; color: #263238; }
         QPushButton:hover { background: #e8f1f5; }
         QPushButton:disabled { color: #90a4ae; background: #eceff1; }
-        QComboBox, QSpinBox, QTextEdit { background: #ffffff; border: 1px solid #b0bec5;
-                                         border-radius: 4px; padding: 4px; }
-        QTableWidget { background: #ffffff; alternate-background-color: #f8fafb;
-                       gridline-color: #cfd8dc; selection-background-color: #bbdefb; }
-        QHeaderView::section { background: #eceff1; color: #263238; padding: 5px;
-                               border: 1px solid #cfd8dc; font-weight: bold; }
-        QProgressBar { background: #eceff1; border: 1px solid #b0bec5; border-radius: 4px;
-                       text-align: center; min-height: 18px; }
+        QComboBox, QSpinBox, QTextEdit { background: #ffffff; border: 1px solid #b0bec5; border-radius: 4px; padding: 4px; }
+        QTableWidget { background: #ffffff; alternate-background-color: #f8fafb; gridline-color: #cfd8dc; selection-background-color: #bbdefb; }
+        QHeaderView::section { background: #eceff1; color: #263238; padding: 5px; border: 1px solid #cfd8dc; font-weight: bold; }
+        QProgressBar { background: #eceff1; border: 1px solid #b0bec5; border-radius: 4px; text-align: center; min-height: 18px; }
         QProgressBar::chunk { background: #81c784; border-radius: 3px; }
         QStatusBar { background: #f5f7f8; color: #455a64; }
     """)

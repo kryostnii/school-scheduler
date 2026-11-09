@@ -8,35 +8,8 @@
     {"id": 2, "name": "5Б", "grade": 5}
   ],
   "groups": [
-    {
-      "id": 1,
-      "class_id": 1,
-      "subject": "Математика",
-      "teacher_id": 1,
-      "hours_per_week": 5,
-      "cabinet_id": 101,
-      "is_physical_education": false,
-      "is_heavy_subject": true
-    },
-    {
-      "id": 2,
-      "class_id": 1,
-      "subject": "Физкультура",
-      "teacher_id": 2,
-      "hours_per_week": 2,
-      "cabinet_id": 201,
-      "is_physical_education": true,
-      "is_heavy_subject": false
-    },
-    {
-      "id": 3,
-      "class_id": 2,
-      "subject": "Математика",
-      "teacher_id": 1,
-      "hours_per_week": 5,
-      "cabinet_id": 101,
-      "is_physical_education": false,
-      "is_heavy_subject": true
-    }
+    {"id": 1, "class_id": 1, "subject": "Математика", "teacher_id": 1, "hours_per_week": 5, "cabinet_id": 101, "is_physical_education": false, "is_heavy_subject": true},
+    {"id": 2, "class_id": 1, "subject": "Физкультура", "teacher_id": 2, "hours_per_week": 2, "cabinet_id": 201, "is_physical_education": true, "is_heavy_subject": false},
+    {"id": 3, "class_id": 2, "subject": "Математика", "teacher_id": 1, "hours_per_week": 5, "cabinet_id": 101, "is_physical_education": false, "is_heavy_subject": true}
   ]
 }
