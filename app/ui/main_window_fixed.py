@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -188,9 +189,7 @@ class SchoolSchedulerMainWindow(QMainWindow):
         self.schedule_table = QTableWidget(10, 6)
         self.schedule_table.setHorizontalHeaderLabels(DAY_NAMES)
         self.schedule_table.setVerticalHeaderLabels([f"Урок {i}" for i in range(1, 11)])
-        self.schedule_table.horizontalHeader().setSectionResizeMode(
-            self.schedule_table.horizontalHeader().Stretch
-        )
+        self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.schedule_table.setEditTriggers(QTableWidget.NoEditTriggers)
         schedule_layout.addWidget(self.schedule_table)
         layout.addWidget(schedule_group, stretch=1)
