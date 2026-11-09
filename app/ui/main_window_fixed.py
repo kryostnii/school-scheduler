@@ -1,321 +1,326 @@
+"""Рабочий графический прототип генератора школьного расписания."""
 import sys
-import os
-from pathlib import Path
 
-# Добавляем путь к модулям
-sys.path.insert(0, str(Path(__file__).parent))
-
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QPushButton, QLabel, QSpinBox, QComboBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QGroupBox, QTextEdit, QTabWidget, QFileDialog, QLineEdit, QCheckBox
+    QApplication,
+    QComboBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QProgressBar,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QColor
+
+from app.services.reference_scheduler import (
+    GAParams,
+    ScheduleContext,
+    SubjectGroupInfo,
+    run_genetic_algorithm,
+)
+
+
+DAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
+SAMPLE_CLASSES = {101: "5А", 102: "5Б", 201: "2А"}
+
+
+def build_sample_context() -> tuple[ScheduleContext, dict[int, str]]:
+    """Создать небольшие тестовые данные, включающие общих учителей и кабинеты."""
+    ctx = ScheduleContext(days_per_week=6)
+    subject_names: dict[int, str] = {}
+    next_id = 1
+
+    def add_group(class_id, grade, teacher_id, subject, hours, *, pe=False, heavy=False):
+        nonlocal next_id
+        group_id = next_id
+        next_id += 1
+        ctx.groups.append(SubjectGroupInfo(
+            id=group_id,
+            class_id=class_id,
+            grade=grade,
+            teacher_id=teacher_id,
+            hours_per_week=hours,
+            is_physical_education=pe,
+            is_heavy_subject=heavy,
+        ))
+        subject_names[group_id] = subject
+
+    add_group(101, 5, 1, "Математика", 5, heavy=True)
+    add_group(101, 5, 2, "Русский язык", 4, heavy=True)
+    add_group(101, 5, 3, "Физкультура", 2, pe=True)
+    add_group(101, 5, 4, "История", 3)
+    add_group(101, 5, 5, "Биология", 2)
+
+    add_group(102, 5, 1, "Математика", 5, heavy=True)
+    add_group(102, 5, 6, "Русский язык", 4, heavy=True)
+    add_group(102, 5, 3, "Физкультура", 2, pe=True)
+    add_group(102, 5, 7, "История", 3)
+    add_group(102, 5, 8, "Биология", 2)
+
+    add_group(201, 2, 9, "Математика", 5, heavy=True)
+    add_group(201, 2, 10, "Чтение", 4)
+    add_group(201, 2, 11, "Физкультура", 2, pe=True)
+    add_group(201, 2, 12, "Окружающий мир", 3)
+
+    ctx.build_lesson_instances()
+    return ctx, subject_names
+
+
+class GenerationWorker(QThread):
+    """Выполняет поиск вне GUI-потока и отправляет безопасные Qt-сигналы."""
+
+    progress = Signal(int, float, int)
+    completed = Signal(object, str)
+
+    def __init__(self, ctx: ScheduleContext, params: GAParams, parent=None):
+        super().__init__(parent)
+        self.ctx = ctx
+        self.params = params
+        self._stop_requested = False
+
+    def run(self):
+        def report_progress(generation, fitness, hard_conflicts):
+            if self._stop_requested:
+                raise InterruptedError("Поиск остановлен пользователем")
+            self.progress.emit(generation, fitness, hard_conflicts)
+
+        try:
+            result = run_genetic_algorithm(self.ctx, self.params, report_progress)
+        except InterruptedError as exc:
+            self.completed.emit(None, str(exc))
+        except Exception as exc:  # Передать ошибку главному потоку, не уронить приложение.
+            self.completed.emit(None, f"{type(exc).__name__}: {exc}")
+        else:
+            self.completed.emit(result, "")
+
+    def stop(self):
+        self._stop_requested = True
+
 
 class SchoolSchedulerMainWindow(QMainWindow):
+    """GUI-прототип: тестовые данные → реальный алгоритм → таблица результата."""
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Школьное расписание - Гибридный алгоритм")
-        self.setGeometry(100, 100, 1400, 900)
-        
-        # Создаем центральный виджет
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        
-        # Основной layout
-        main_layout = QVBoxLayout(central_widget)
-        
-        # Заголовок
-        title_label = QLabel("Школьное расписание - Гибридный алгоритм")
-        title_label.setAlignment(Qt.AlignCenter)
-        title_label.setStyleSheet("font-size: 20px; font-weight: bold; margin: 10px; color: #2c5aa0;")
-        main_layout.addWidget(title_label)
-        
-        # Инструкция для пользователя
-        instruction_group = QGroupBox("Как использовать программу")
-        instruction_layout = QVBoxLayout(instruction_group)
-        instruction_text = QLabel(
-            "1. Введите название вашей школы\n"
-            "2. Укажите количество классов\n"
-            "3. Нажмите 'Запустить оптимизацию'\n"
-            "4. Получите расписание для всех классов\n"
-            "5. При необходимости экспортируйте результаты"
+        self.setWindowTitle("Школьное расписание — рабочий прототип")
+        self.resize(1100, 760)
+        self.ctx, self.subject_names = build_sample_context()
+        self.worker = None
+        self.result = None
+        self._setup_ui()
+
+    def _setup_ui(self):
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("Генератор школьного расписания")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #2c3e50;")
+        layout.addWidget(title)
+
+        intro = QLabel(
+            "Рабочий прототип: оптимизатор запускается на тестовой школе и "
+            "показывает фактические конфликты и результат поиска. "
+            "Пользовательские данные и импорт пока не подключены."
         )
-        instruction_text.setStyleSheet("font-size: 12px; padding: 10px;")
-        instruction_layout.addWidget(instruction_text)
-        main_layout.addWidget(instruction_group)
-        
-        # Вкладки для управления
-        self.tabs = QTabWidget()
-        
-        # Вкладка 1: Управление параметрами
-        control_tab = QWidget()
-        control_layout = QVBoxLayout(control_tab)
-        
-        # Панель информации о школе
-        school_group = QGroupBox("Информация о школе")
-        school_layout = QVBoxLayout(school_group)
-        
-        self.school_name_input = QLineEdit()
-        self.school_name_input.setText("Средняя общеобразовательная школа №1")
-        self.school_name_input.setPlaceholderText("Введите название школы")
-        
-        school_layout.addWidget(QLabel("Название школы:"))
-        school_layout.addWidget(self.school_name_input)
-        
-        self.class_count_spin = QSpinBox()
-        self.class_count_spin.setRange(1, 20)
-        self.class_count_spin.setValue(3)
-        self.class_count_spin.setSuffix(" классов")
-        
-        school_layout.addWidget(QLabel("Количество классов:"))
-        school_layout.addWidget(self.class_count_spin)
-        
-        control_layout.addWidget(school_group)
-        
-        # Панель управления
-        control_group = QGroupBox("Настройки оптимизации")
-        control_group_layout = QVBoxLayout(control_group)
-        
-        # Объяснение параметров
-        params_explanation = QLabel(
-            "Параметры алгоритма (для обычного пользователя):\n"
-            "🔹 Размер популяции - сколько вариантов расписаний проверяется одновременно\n"
-            "🔹 Количество поколений - сколько раз алгоритм улучшает решение\n"
-            "🔹 Рекомендуемый вариант: Популяция=60, Поколения=300"
-        )
-        params_explanation.setStyleSheet("font-size: 11px; padding: 10px;")
-        control_group_layout.addWidget(params_explanation)
-        
-        # Параметры алгоритма
-        param_layout = QHBoxLayout()
-        
-        population_label = QLabel("Размер популяции:")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #566573; padding: 4px;")
+        layout.addWidget(intro)
+
+        settings = QGroupBox("Параметры поиска")
+        form = QFormLayout(settings)
+        self.class_combo = QComboBox()
+        for class_id, label in SAMPLE_CLASSES.items():
+            self.class_combo.addItem(label, class_id)
+        self.class_combo.currentIndexChanged.connect(self._render_schedule)
+        form.addRow("Показать класс:", self.class_combo)
+
         self.population_spin = QSpinBox()
         self.population_spin.setRange(10, 500)
         self.population_spin.setValue(60)
-        self.population_spin.setSuffix(" вариантов")
-        
-        generations_label = QLabel("Количество поколений:")
+        form.addRow("Размер популяции:", self.population_spin)
+
         self.generations_spin = QSpinBox()
         self.generations_spin.setRange(10, 2000)
         self.generations_spin.setValue(300)
-        self.generations_spin.setSuffix(" раз")
-        
-        param_layout.addWidget(population_label)
-        param_layout.addWidget(self.population_spin)
-        param_layout.addWidget(generations_label)
-        param_layout.addWidget(self.generations_spin)
-        
-        control_group_layout.addLayout(param_layout)
-        
-        # Кнопки управления
-        button_layout = QHBoxLayout()
-        self.run_button = QPushButton("🚀 Создать расписание")
-        self.run_button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 12px; font-size: 14px;")
+        form.addRow("Поколения:", self.generations_spin)
+        layout.addWidget(settings)
+
+        buttons = QHBoxLayout()
+        self.run_button = QPushButton("▶ Запустить генерацию")
         self.run_button.clicked.connect(self.run_optimization)
-        
-        self.reset_button = QPushButton("🔄 Сброс")
-        self.reset_button.setStyleSheet("padding: 8px;")
-        self.reset_button.clicked.connect(self.reset_all)
-        
-        self.export_button = QPushButton("📤 Экспорт")
-        self.export_button.setStyleSheet("padding: 8px;")
-        self.export_button.clicked.connect(self.export_data)
-        
-        self.load_button = QPushButton("📂 Загрузить")
-        self.load_button.setStyleSheet("padding: 8px;")
-        self.load_button.clicked.connect(self.load_data)
-        
-        button_layout.addWidget(self.run_button)
-        button_layout.addWidget(self.reset_button)
-        button_layout.addWidget(self.export_button)
-        button_layout.addWidget(self.load_button)
-        
-        control_group_layout.addLayout(button_layout)
-        control_layout.addWidget(control_group)
-        
-        # Результаты и статистика
-        stats_group = QGroupBox("Результаты оптимизации")
-        stats_layout = QVBoxLayout(stats_group)
-        
-        self.results_text = QTextEdit()
-        self.results_text.setReadOnly(True)
-        self.results_text.setMaximumHeight(150)
-        self.results_text.setStyleSheet("font-size: 12px;")
-        stats_layout.addWidget(self.results_text)
-        
-        control_layout.addWidget(stats_group)
-        
-        # Вкладка 2: Расписание
-        schedule_tab = QWidget()
-        schedule_layout = QVBoxLayout(schedule_tab)
-        
-        # Заголовок таблицы расписания
-        schedule_header = QLabel("Пример расписания школы")
-        schedule_header.setAlignment(Qt.AlignCenter)
-        schedule_header.setStyleSheet("font-size: 16px; font-weight: bold; margin: 10px; color: #2c5aa0;")
-        schedule_layout.addWidget(schedule_header)
-        
-        # Таблица расписания для нескольких классов
-        self.schedule_table = QTableWidget(10, 8)  # 10 уроков, 7 дней + классы
-        self.schedule_table.setHorizontalHeaderLabels(["Класс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Урок"])
+        self.stop_button = QPushButton("■ Остановить")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self.stop_optimization)
+        buttons.addWidget(self.run_button)
+        buttons.addWidget(self.stop_button)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, self.generations_spin.value())
+        self.progress.setFormat("Ожидание запуска")
+        layout.addWidget(self.progress)
+
+        result_group = QGroupBox("Результат и ход поиска")
+        result_layout = QVBoxLayout(result_group)
+        self.results = QTextEdit()
+        self.results.setReadOnly(True)
+        self.results.setMaximumHeight(150)
+        result_layout.addWidget(self.results)
+        layout.addWidget(result_group)
+
+        schedule_group = QGroupBox("Расписание выбранного класса")
+        schedule_layout = QVBoxLayout(schedule_group)
+        self.schedule_table = QTableWidget(10, 6)
+        self.schedule_table.setHorizontalHeaderLabels(DAY_NAMES)
         self.schedule_table.setVerticalHeaderLabels([f"Урок {i}" for i in range(1, 11)])
-        
-        # Настройка таблицы
-        self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.schedule_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.schedule_table.horizontalHeader().setSectionResizeMode(
+            self.schedule_table.horizontalHeader().Stretch
+        )
         self.schedule_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        
         schedule_layout.addWidget(self.schedule_table)
-        
-        # Добавляем вкладки
-        self.tabs.addTab(control_tab, "Настройки")
-        self.tabs.addTab(schedule_tab, "Расписание")
-        
-        # Добавляем вкладки в основной layout
-        main_layout.addWidget(self.tabs)
-        
-        # Статус строка
-        status_bar = self.statusBar()
-        status_bar.showMessage("Готов к запуску оптимизации")
-        
-        # Инициализация данных
-        self.school_data = {
-            'name': "Средняя общеобразовательная школа №1",
-            'classes': ['5А', '5Б', '6А'],
-            'subjects': ['Математика', 'Русский язык', 'История', 'Физика', 'Биология', 'Химия']
-        }
-    
+        layout.addWidget(schedule_group, stretch=1)
+
+        self.statusBar().showMessage(
+            f"Тестовые данные: {len(self.ctx.groups)} учебных групп, "
+            f"{len(self.ctx.lesson_instances)} часов в неделю"
+        )
+
     def run_optimization(self):
-        """Запуск оптимизации расписания"""
-        try:
-            self.statusBar().showMessage("Выполняется оптимизация...")
-            
-            # Вывод информации о школе
-            msg = f"Создается расписание для школы: {self.school_name_input.text()}\n"
-            msg += f"Количество классов: {self.class_count_spin.value()}\n"
-            msg += "Начало оптимизации...\n"
-            
-            self.results_text.append(msg)
-            
-            # Симуляция прогресса
-            import time
-            for i in range(0, 100, 20):
-                time.sleep(0.1)  # Имитация работы
-                self.results_text.append(f"Прогресс: {i}%")
-                
-            # Вывод результатов
-            result_msg = "✅ Расписание успешно создано!\n"
-            result_msg += "📊 Статистика оптимизации:\n"
-            result_msg += "   - Жесткие конфликты: 0 ❌\n" 
-            result_msg += "   - Мягкие штрафы: 19.0 ✅\n"
-            result_msg += "   - Время выполнения: 0.4 секунды\n"
-            result_msg += "   - Качество расписания: 95% ✅\n"
-            result_msg += "   - Все уроки распределены без конфликтов\n"
-            
-            self.results_text.append(result_msg)
-            
-            # Заполнение таблицы примерами
-            self.populate_schedule_examples()
-            
-            self.statusBar().showMessage("Оптимизация завершена успешно")
-            
-        except Exception as e:
-            self.statusBar().showMessage("Ошибка выполнения")
-            self.results_text.append(f"Ошибка: {e}")
-            
-    def populate_schedule_examples(self):
-        """Заполнение таблицы примерами расписания"""
-        import random
-        
-        # Используем цвета для разных предметов
-        subject_colors = {
-            'Математика': QColor(200, 230, 255),      # Голубой
-            'Русский язык': QColor(255, 220, 220),   # Красный
-            'История': QColor(220, 255, 220),         # Зеленый
-            'Физика': QColor(255, 255, 200),          # Желтый
-            'Биология': QColor(240, 240, 240),        # Серый
-            'Химия': QColor(230, 200, 255)           # Фиолетовый
-        }
-        
-        subject_list = list(subject_colors.keys())
-        
-        # Заполняем таблицу примерами расписания
-        for i in range(10):  # 10 уроков
-            class_names = ['5А', '5Б', '6А', '7А', '8Б']
-            for j in range(7):  # 7 дней
-                # Выбираем случайный класс и предмет
-                class_name = random.choice(class_names)
-                subject = random.choice(subject_list)
-                color = subject_colors[subject]
-                
-                item = QTableWidgetItem(subject)
-                item.setBackground(color)
-                
-                # Физика жирным шрифтом для лучшей читаемости
-                if subject == 'Физика':
-                    font = QFont()
-                    font.setBold(True)
-                    item.setFont(font)
-                    
-                self.schedule_table.setItem(i, j+1, item)  # Смещение на 1 из-за столбца классов
-                
-                # В первом столбце указываем класс
-                if i == 0:
-                    class_item = QTableWidgetItem(class_name)
-                    class_item.setBackground(QColor(220, 220, 220))
-                    self.schedule_table.setItem(i, 0, class_item)
-    
-    def reset_all(self):
-        """Сброс данных"""
-        self.results_text.clear()
+        if self.worker and self.worker.isRunning():
+            return
+        self.ctx, self.subject_names = build_sample_context()
+        params = GAParams(
+            population_size=self.population_spin.value(),
+            max_generations=self.generations_spin.value(),
+            mutation_rate=0.1,
+            random_seed=42,
+        )
+        self.result = None
+        self.results.clear()
+        self.results.append(
+            f"Запуск реального Python-алгоритма: {len(self.ctx.groups)} групп, "
+            f"{len(self.ctx.lesson_instances)} уроков-часов, "
+            f"популяция {params.population_size}, поколений {params.max_generations}."
+        )
+        self.progress.setRange(0, params.max_generations)
+        self.progress.setValue(0)
+        self.progress.setFormat("Поиск расписания…")
+        self.run_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+
+        self.worker = GenerationWorker(self.ctx, params, self)
+        self.worker.progress.connect(self._on_progress)
+        self.worker.completed.connect(self._on_completed)
+        self.worker.start()
+        self.statusBar().showMessage("Алгоритм выполняется в фоновом потоке")
+
+    def stop_optimization(self):
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            self.stop_button.setEnabled(False)
+            self.statusBar().showMessage("Остановка после текущего поколения…")
+
+    def _on_progress(self, generation, fitness, hard_conflicts):
+        self.progress.setValue(generation)
+        self.progress.setFormat(f"Поколение {generation}: ошибок {hard_conflicts}")
+        if generation == 1 or generation % 25 == 0:
+            self.results.append(
+                f"Поколение {generation}: жёстких конфликтов {hard_conflicts}, "
+                f"общий штраф {fitness:.1f}"
+            )
+
+    def _on_completed(self, result, error):
+        self.run_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.worker = None
+
+        if error:
+            self.progress.setFormat("Поиск остановлен или завершился ошибкой")
+            self.results.append(error)
+            self.statusBar().showMessage(error)
+            return
+
+        self.result = result
+        fitness = result.best_fitness
+        self.results.append(
+            f"Завершено за {result.generations_run} поколений. "
+            f"Жёсткие конфликты: {fitness.hard_conflicts}; "
+            f"мягкий штраф: {fitness.soft_penalty:.1f}; "
+            f"итоговая оценка: {fitness.total():.1f}."
+        )
+        if fitness.hard_conflicts == 0:
+            self.results.append("Допустимое расписание найдено: жёстких конфликтов нет.")
+            self.progress.setFormat("Готово — жёстких конфликтов нет")
+        else:
+            self.results.append(
+                "Полностью допустимое расписание не найдено; результат отображён "
+                "для анализа и не объявляется успешным."
+            )
+            self.progress.setFormat(f"Готово — осталось ошибок: {fitness.hard_conflicts}")
+        self._render_schedule()
+        self.statusBar().showMessage("Поиск завершён")
+
+    def _render_schedule(self):
         self.schedule_table.clearContents()
-        self.statusBar().showMessage("Данные сброшены")
-        
-    def export_data(self):
-        """Экспорт данных"""  
-        try:
-            filename, _ = QFileDialog.getSaveFileName(
-                self, "Сохранить результаты", "", 
-                "Text Files (*.txt);;CSV Files (*.csv);;All Files (*)"
-            )
-            if filename:
-                with open(filename, 'w', encoding='utf-8') as f:
-                    f.write("Результаты оптимизации School Scheduler\n")
-                    f.write(f"Школа: {self.school_name_input.text()}\n")
-                    f.write(f"Классов: {self.class_count_spin.value()}\n")
-                    f.write("=" * 50 + "\n")
-                    f.write(self.results_text.toPlainText())
-                self.statusBar().showMessage(f"Данные экспортированы в {filename}")
-        except Exception as e:
-            self.statusBar().showMessage("Ошибка экспорта данных")
-            print(f"Экспорт не удался: {e}")
-    
-    def load_data(self):
-        """Загрузка данных"""
-        try:
-            filename, _ = QFileDialog.getOpenFileName(
-                self, "Загрузить данные", "", 
-                "Text Files (*.txt);;CSV Files (*.csv);;All Files (*)"
-            )
-            if filename:
-                with open(filename, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    self.results_text.append(f"\nЗагружены данные из {filename}")
-                    self.results_text.append(content)
-                    
-                self.statusBar().showMessage(f"Данные загружены из {filename}")
-        except Exception as e:
-            self.statusBar().showMessage("Ошибка загрузки данных")
-            print(f"Загрузка не удалась: {e}")
+        if not self.result or not self.result.best:
+            return
+        class_id = self.class_combo.currentData()
+        slots: dict[tuple[int, int], list[str]] = {}
+        for index, instance in enumerate(self.ctx.lesson_instances):
+            group = self.ctx.groups[instance.group_index]
+            if group.class_id != class_id:
+                continue
+            gene = self.result.best[index]
+            label = self.subject_names.get(group.id, f"Предмет {group.id}")
+            slots.setdefault((gene.day, gene.lesson_number), []).append(label)
+
+        for (day, lesson), subjects in slots.items():
+            if not (1 <= day <= 6 and 1 <= lesson <= self.schedule_table.rowCount()):
+                continue
+            text = " / ".join(subjects)
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setBackground(QColor("#fdebd0" if len(subjects) > 1 else "#eaf2f8"))
+            if len(subjects) > 1:
+                item.setToolTip("В одном слоте несколько уроков: проверьте конфликт")
+            self.schedule_table.setItem(lesson - 1, day - 1, item)
+
+    def closeEvent(self, event):
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait(5000)
+            if self.worker.isRunning():
+                QMessageBox.warning(
+                    self,
+                    "Поиск ещё выполняется",
+                    "Дождитесь завершения текущего поколения и закройте окно ещё раз.",
+                )
+                event.ignore()
+                return
+        event.accept()
+
 
 def main():
     app = QApplication(sys.argv)
     window = SchoolSchedulerMainWindow()
     window.show()
-    sys.exit(app.exec())
+    return app.exec()
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
